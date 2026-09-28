@@ -1,0 +1,3 @@
+[submodule "third_party/tiny-gpu"]
+	path = third_party/tiny-gpu
+	url = https://github.com/adam-maj/tiny-gpu.git

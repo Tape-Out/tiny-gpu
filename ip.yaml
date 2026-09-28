@@ -1,0 +1,111 @@
+name: tiny-gpu
+version: 0.1.0
+spec: '0.1'
+kind: ip
+lang: sv
+identity:
+  slug: tiny-gpu-tapeout-foreign
+  display_name: tiny-gpu
+  summary: 'Adam Majmudar''s tiny-gpu, a minimal GPU for learning how GPUs work, taken as a black box.'
+  category: accelerator
+  subcategories:
+  - gpu
+  ip_family: tiny-gpu
+  integration_profile: []
+  maturity: planned
+contract:
+  version: 1
+  ctrl:
+    shape: none
+    aw: 32
+    dw: 32
+params:
+  numCores:
+    type: int
+    default: 2
+    # 程序存储控制器的使用方就是各核；只有一个时 $clog2(1) 为零，sv2v 展平后是零宽的部分选择
+    range: [2, 4]
+    desc: 计算核数，每核一个取指口
+  threadsPerBlock:
+    # 上游在块装不满时核不结束（3 个一块时两个测试都卡住），线程数得是它的整数倍；
+    # 上游两个内核分别是 8 与 4 个线程，取 8 时矩阵乘法那一块装不满
+    type: choice
+    values: [1, 2, 4]
+    default: 4
+    desc: 每块的线程数，也就是每核的 ALU 与 LSU 份数
+emit:
+- kind: foreign
+  lang: verilog
+  top: gpu
+  # 源码里有 IEEE 1800 不许的写法（controller.sv 把整数赋给非打包数组），上游自己也是先过
+  # sv2v 再给 iverilog，cocotb 测试对着的正是转换后的端口
+  setup: sv2v
+  rtl:
+  - build/gpu.v
+  params:
+    NUM_CORES: numCores
+    THREADS_PER_BLOCK: threadsPerBlock
+  clock:
+    port: clk
+  reset:
+    port: reset
+    active: high
+    sync: true
+  ports:
+  - endpoint: program
+    kind: transaction
+    role: manager
+    profile: tiny-gpu-mem
+    prefix: program_
+  - endpoint: data
+    kind: transaction
+    role: manager
+    profile: tiny-gpu-mem
+    prefix: data_
+  - endpoint: pins
+    kind: physical
+    type: TinyGpuPins
+    map:
+      start: start
+      done: done
+      deviceControlWriteEnable: device_control_write_enable
+      deviceControlData: device_control_data
+  limits:
+  - 存储的位宽与通道数照上游默认（数据 8 位、4 路，程序 16 位、1 路），上游测试写死了它们，本版不开放
+  - 最后一块装不满时核不结束（上游缺陷），内核的线程数要是 threadsPerBlock 的整数倍
+  - 上游仓没有许可文件；这里只挂子模块、不改也不转载它的源码
+tasks:
+  sv2v:
+    desc: 照上游 Makefile 的 compile：全部源码过 sv2v，开头补 timescale
+    run: >-
+      bash -c 'set -e; mkdir -p build;
+      sv2v -w build/gpu.sv2v.v third_party/tiny-gpu/src/*.sv;
+      { echo "\`timescale 1ns/1ns"; cat build/gpu.sv2v.v; } > build/gpu.v'
+  matadd:
+    desc: 上游的 cocotb 测试：矩阵加法，逐个比对结果
+    cwd: third_party/tiny-gpu
+    run: >-
+      bash -c 'set -e; D={{out}}; mkdir -p $D;
+      iverilog -g2012 -s gpu -Pgpu.NUM_CORES={{knob.numCores}} -Pgpu.THREADS_PER_BLOCK={{knob.threadsPerBlock}}
+      -o $D/matadd.vvp {{root}}/build/gpu.v;
+      MODULE=test.test_matadd vvp -M $(cocotb-config --prefix)/cocotb/libs -m libcocotbvpi_icarus $D/matadd.vvp
+      | tee $D/matadd.log;
+      grep -qE "TESTS=[1-9][0-9]* PASS=[1-9][0-9]* FAIL=0" $D/matadd.log'
+  matmul:
+    desc: 上游的 cocotb 测试：矩阵乘法，逐个比对结果
+    cwd: third_party/tiny-gpu
+    run: >-
+      bash -c 'set -e; D={{out}}; mkdir -p $D;
+      iverilog -g2012 -s gpu -Pgpu.NUM_CORES={{knob.numCores}} -Pgpu.THREADS_PER_BLOCK={{knob.threadsPerBlock}}
+      -o $D/matmul.vvp {{root}}/build/gpu.v;
+      MODULE=test.test_matmul vvp -M $(cocotb-config --prefix)/cocotb/libs -m libcocotbvpi_icarus $D/matmul.vvp
+      | tee $D/matmul.log;
+      grep -qE "TESTS=[1-9][0-9]* PASS=[1-9][0-9]* FAIL=0" $D/matmul.log'
+test:
+  upstream:
+  # cocotb 失败时 vvp 照样返回 0，所以判的是它打出来的汇总行
+  - { name: matadd, task: matadd, timeout: 300 }
+  - { name: matmul, task: matmul, timeout: 300 }
+targets:
+  foreign:
+    driver: foreign
